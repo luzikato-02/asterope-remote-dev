@@ -1,10 +1,18 @@
-FROM codercom/code-server:latest
+FROM ubuntu:24.04
 
-USER root
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=UTC
 
+# Install code-server via official install script
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && curl -fsSL https://code-server.dev/install.sh | sh \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Common dev tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
-    curl \
     wget \
     vim \
     nano \
@@ -13,13 +21,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     jq \
     tree \
+    sudo \
     build-essential \
-    ca-certificates \
     gnupg \
     lsb-release \
-    software-properties-common \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Create non-root coder user (UID 1000 matches typical host user)
+RUN useradd -m -u 1000 -s /bin/bash coder \
+    && echo "coder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/coder \
+    && chmod 0440 /etc/sudoers.d/coder
 
 USER coder
 WORKDIR /home/coder/project
+EXPOSE 8080
+ENTRYPOINT ["code-server"]
+CMD ["--auth", "none", "--bind-addr", "0.0.0.0:8080", "/home/coder/project"]
