@@ -1,18 +1,15 @@
-import { exec, spawn } from 'child_process';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
 import fs from 'fs-extra';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import simpleGit from 'simple-git';
 
-const execAsync = promisify(exec);
-
-const DATA_DIR       = process.env.DATA_DIR    || '/var/asterope';
+const DATA_DIR       = process.env.DATA_DIR   || '/var/asterope';
 const WORKSPACES_DIR = path.join(DATA_DIR, 'workspaces');
 const DB_FILE        = path.join(DATA_DIR, 'workspaces.json');
 const STARTING_PORT  = parseInt(process.env.STARTING_PORT || '8100');
 
-// Map template name -> Docker image
+// Map template -> Docker image tag
 const IMAGE_MAP = {
   blank:     'asterope/base',
   node:      'asterope/node',
@@ -24,10 +21,46 @@ const IMAGE_MAP = {
   fullstack: 'asterope/fullstack',
 };
 
-// In-memory container registry: workspaceId -> { containerId, containerName, startedAt, logBuffer, logProc }
+// In-memory container registry
 const containers = new Map();
 
-// ─── File starters (scaffold files when NOT cloning from git) ───────────────
+// ─── Docker helpers ───────────────────────────────────────────────────────────
+
+// Run any `docker <args>` call with proper arg passing (no shell string joining)
+function dockerRun(...args) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', d => { stdout += d.toString(); });
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', code => {
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(stderr.trim() || `docker exited with code ${code}`));
+    });
+  });
+}
+
+async function isContainerRunning(name) {
+  try {
+    const out = await dockerRun('inspect', '-f', '{{.State.Running}}', name);
+    return out === 'true';
+  } catch {
+    return false;
+  }
+}
+
+async function containerExists(name) {
+  try {
+    await dockerRun('inspect', '--format', '{{.Name}}', name);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ─── File starters (scaffold project files on creation) ─────────────────────
 
 const STARTERS = {
   blank:     async () => {},
@@ -62,36 +95,21 @@ const STARTERS = {
   },
   laravel:   async (dir) => {
     await fs.writeFile(path.join(dir, 'SETUP.md'),
-      '# Laravel Setup\n\nOpen a terminal in this workspace and run:\n```bash\ncomposer create-project laravel/laravel .\n```\nOr to install a specific version:\n```bash\ncomposer create-project laravel/laravel:^11 .\n```\n');
+      '# Laravel Setup\n\nOpen a terminal in this workspace and run:\n```bash\ncomposer create-project laravel/laravel .\n```\n');
   },
   go:        async (dir) => {
     const name = path.basename(dir);
     await fs.writeFile(path.join(dir, 'go.mod'), `module ${name}\n\ngo 1.22\n`);
     await fs.writeFile(path.join(dir, 'main.go'), 'package main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("Hello from Asterope!")\n}\n');
-    await fs.writeFile(path.join(dir, '.gitignore'), '*.exe\n*.exe~\n*.dll\n*.so\n*.dylib\n');
+    await fs.writeFile(path.join(dir, '.gitignore'), '*.exe\n*.dll\n*.so\n');
   },
   fullstack: async (dir) => {
     await fs.writeFile(path.join(dir, 'README.md'),
-      '# Full-stack Workspace\n\nThis container includes: PHP 8.3 + Composer, Node.js 20 + npm/yarn, Python 3 + pip/poetry, Go 1.22.\n\nOpen the terminal in code-server to get started.\n');
+      '# Full-stack Workspace\n\nAvailable: PHP 8.3 + Composer, Node.js 20 + npm/yarn, Python 3 + pip/poetry, Go 1.22\n');
   },
 };
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function containerName(id) {
-  return `asterope-ws-${id.slice(0, 12)}`;
-}
-
-async function isContainerRunning(name) {
-  try {
-    const { stdout } = await execAsync(
-      `docker inspect -f '{{.State.Running}}' "${name}" 2>/dev/null`
-    );
-    return stdout.trim() === 'true';
-  } catch {
-    return false;
-  }
-}
+// ─── Persistence ─────────────────────────────────────────────────────────────
 
 async function loadWorkspaces() {
   try {
@@ -114,19 +132,26 @@ async function getNextPort(workspaces) {
   return port;
 }
 
-// On server startup, re-attach to any containers that are still running
+// ─── Container name helper ────────────────────────────────────────────────────
+
+function cname(id) {
+  return `asterope-ws-${id.slice(0, 12)}`;
+}
+
+// ─── Startup: re-attach to containers still running from a previous session ──
+
 async function reconcileContainers() {
   try {
     const workspaces = await loadWorkspaces();
     for (const ws of workspaces) {
-      const name = containerName(ws.id);
-      if (await isContainerRunning(name) && !containers.has(ws.id)) {
+      const name = cname(ws.id);
+      if (!containers.has(ws.id) && await isContainerRunning(name)) {
         containers.set(ws.id, {
-          containerId: null,
+          containerId:   null,
           containerName: name,
-          startedAt: ws.lastOpenedAt || new Date().toISOString(),
-          logBuffer: [{ ts: Date.now(), line: '[server restarted — container was already running]' }],
-          logProc: null
+          startedAt:     ws.lastOpenedAt || new Date().toISOString(),
+          logBuffer:     [{ ts: Date.now(), line: '[server restarted — container was already running]' }],
+          logProc:       null
         });
       }
     }
@@ -138,7 +163,7 @@ async function init() {
   await reconcileContainers();
 }
 
-// ─── Public API ──────────────────────────────────────────────────────────────
+// ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function listWorkspaces() {
   const workspaces = await loadWorkspaces();
@@ -146,9 +171,9 @@ export async function listWorkspaces() {
     ...w,
     status: containers.has(w.id) ? 'running'
       : w.status === 'creating' ? 'creating'
-      : w.status === 'error' ? 'error'
+      : w.status === 'error'   ? 'error'
       : 'stopped',
-    image: IMAGE_MAP[w.template] || 'asterope/base',
+    image:       IMAGE_MAP[w.template] || 'asterope/base',
     containerId: containers.get(w.id)?.containerId || null
   }));
 }
@@ -159,8 +184,8 @@ export async function getWorkspace(id) {
   if (!w) return null;
   return {
     ...w,
-    status: containers.has(id) ? 'running' : w.status === 'creating' ? 'creating' : 'stopped',
-    image: IMAGE_MAP[w.template] || 'asterope/base',
+    status:      containers.has(id) ? 'running' : w.status === 'creating' ? 'creating' : 'stopped',
+    image:       IMAGE_MAP[w.template] || 'asterope/base',
     containerId: containers.get(id)?.containerId || null
   };
 }
@@ -175,40 +200,44 @@ export async function createWorkspace({ name, description, gitUrl, template }) {
     throw new Error(`A workspace named "${name}" already exists`);
   }
 
-  const id   = uuidv4();
-  const port = await getNextPort(workspaces);
+  const id            = uuidv4();
+  const port          = await getNextPort(workspaces);
   const workspacePath = path.join(WORKSPACES_DIR, name);
 
   const workspace = {
     id, name,
-    description: description || '',
-    gitUrl: gitUrl || null,
-    template: template || 'blank',
+    description:  description || '',
+    gitUrl:       gitUrl || null,
+    template:     template || 'blank',
     port,
-    path: workspacePath,
-    status: 'creating',
-    createdAt: new Date().toISOString(),
+    path:         workspacePath,
+    status:       'creating',
+    createdAt:    new Date().toISOString(),
     lastOpenedAt: null,
-    error: null
+    error:        null
   };
 
   workspaces.push(workspace);
   await saveWorkspaces(workspaces);
 
-  // Async setup — does not block the API response
+  // Async scaffold — does not block the API response
   setImmediate(async () => {
     const all = await loadWorkspaces();
     const idx = all.findIndex(w => w.id === id);
-
     try {
       await fs.ensureDir(workspacePath);
 
-      // Ensure the coder user (UID 1000) inside Docker can write files
-      try { await execAsync(`chown -R 1000:1000 "${workspacePath}"`); } catch {}
+      // coder user inside the container has UID 1000
+      try {
+        await new Promise((res, rej) => {
+          const p = spawn('chown', ['-R', '1000:1000', workspacePath]);
+          p.on('close', c => c === 0 ? res() : rej());
+          p.on('error', rej);
+        });
+      } catch {}
 
       if (gitUrl) {
-        const git = simpleGit();
-        await git.clone(gitUrl, workspacePath);
+        await simpleGit().clone(gitUrl, workspacePath);
       } else {
         const scaffold = STARTERS[template] || STARTERS.blank;
         await scaffold(workspacePath);
@@ -219,7 +248,6 @@ export async function createWorkspace({ name, description, gitUrl, template }) {
       all[idx].status = 'error';
       all[idx].error  = err.message;
     }
-
     await saveWorkspaces(all);
   });
 
@@ -230,55 +258,57 @@ export async function startWorkspace(id) {
   const workspaces = await loadWorkspaces();
   const workspace  = workspaces.find(w => w.id === id);
 
-  if (!workspace) throw new Error('Workspace not found');
-  if (containers.has(id)) throw new Error('Workspace is already running');
-  if (workspace.status === 'creating') throw new Error('Workspace is still being created');
+  if (!workspace)                        throw new Error('Workspace not found');
+  if (containers.has(id))                throw new Error('Workspace is already running');
+  if (workspace.status === 'creating')   throw new Error('Workspace is still being created');
   if (!(await fs.pathExists(workspace.path))) throw new Error('Workspace directory not found');
 
-  const name     = containerName(id);
-  const image    = IMAGE_MAP[workspace.template] || 'asterope/base';
+  const name  = cname(id);
+  const image = IMAGE_MAP[workspace.template] || 'asterope/base';
+
+  // Remove any stopped container with the same name
+  if (await containerExists(name)) {
+    try { await dockerRun('rm', '-f', name); } catch {}
+  }
+
   const logBuffer = [];
 
-  // Remove any stopped container with this name
-  try { await execAsync(`docker rm -f "${name}" 2>/dev/null`); } catch {}
-
-  // docker run
-  const args = [
-    'run', '-d',
-    '--name', name,
-    '--hostname', workspace.name.replace(/[^a-zA-Z0-9-]/g, '-'),
-    '-p', `${workspace.port}:8080`,
-    '-v', `${workspace.path}:/home/coder/project:cached`,
-    '-e', 'DOCKER_USER=coder',
-    '--label', `asterope.workspace.id=${id}`,
-    '--label', `asterope.workspace.name=${workspace.name}`,
-    image,
-    '--auth', 'none',
-    '--bind-addr', '0.0.0.0:8080',
-    '--disable-telemetry',
-    '/home/coder/project'
-  ];
-
+  // docker run (uses spawn — no shell, no string joining, handles paths with spaces)
   let containerId;
   try {
-    const { stdout } = await execAsync(`docker ${args.join(' ')}`);
-    containerId = stdout.trim();
+    containerId = await dockerRun(
+      'run', '-d',
+      '--name',     name,
+      '--hostname', workspace.name.replace(/[^a-zA-Z0-9-]/g, '-'),
+      '-p',         `${workspace.port}:8080`,
+      '-v',         `${workspace.path}:/home/coder/project:cached`,
+      '-e',         'DOCKER_USER=coder',
+      '--label',    `asterope.workspace.id=${id}`,
+      '--label',    `asterope.workspace.name=${workspace.name}`,
+      image,
+      '--auth',     'none',
+      '--bind-addr', '0.0.0.0:8080',
+      '--disable-telemetry',
+      '/home/coder/project'
+    );
   } catch (err) {
-    const hint = err.message.includes('No such image')
-      ? ` — run "bash scripts/build-images.sh" to build Docker images first`
+    const isNoImage = err.message.includes('No such image') || err.message.includes('pull access denied');
+    const hint = isNoImage
+      ? `\n\nThe Docker image "${image}" is not built yet. Run:\n  bash /opt/asterope/scripts/build-images.sh`
       : '';
     throw new Error(`Failed to start container: ${err.message}${hint}`);
   }
 
-  // Follow container logs in the background
-  const logProc = spawn('docker', ['logs', '-f', '--tail', '50', name], { stdio: ['ignore', 'pipe', 'pipe'] });
+  // Follow container logs in background
+  const logProc = spawn('docker', ['logs', '-f', '--tail', '50', name], {
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
 
   const onData = (chunk) => {
     const line = chunk.toString().trim();
-    if (line) {
-      logBuffer.push({ ts: Date.now(), line });
-      if (logBuffer.length > 200) logBuffer.shift();
-    }
+    if (!line) return;
+    logBuffer.push({ ts: Date.now(), line });
+    if (logBuffer.length > 200) logBuffer.shift();
   };
 
   logProc.stdout.on('data', onData);
@@ -288,7 +318,13 @@ export async function startWorkspace(id) {
     logBuffer.push({ ts: Date.now(), line: '[container stopped]' });
   });
 
-  containers.set(id, { containerId, containerName: name, startedAt: new Date().toISOString(), logBuffer, logProc });
+  containers.set(id, {
+    containerId,
+    containerName: name,
+    startedAt:     new Date().toISOString(),
+    logBuffer,
+    logProc
+  });
 
   const idx = workspaces.findIndex(w => w.id === id);
   workspaces[idx].lastOpenedAt = new Date().toISOString();
@@ -305,8 +341,8 @@ export async function stopWorkspace(id) {
 
   try { logProc?.kill('SIGTERM'); } catch {}
 
-  try { await execAsync(`docker stop "${name}"`); }   catch {}
-  try { await execAsync(`docker rm   "${name}"`); }   catch {}
+  try { await dockerRun('stop', name); } catch {}
+  try { await dockerRun('rm',   name); } catch {}
 
   containers.delete(id);
   return { success: true };
