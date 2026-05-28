@@ -1,0 +1,11 @@
+FROM asterope/base:latest
+
+USER root
+
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g typescript ts-node nodemon yarn pnpm
+
+USER coder

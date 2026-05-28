@@ -52,10 +52,10 @@ info "Starting Asterope setup..."
 # ─────────────────────────────────────────────────────────────
 info "Updating system packages..."
 apt-get update -qq
-apt-get install -y -qq curl wget git nginx ufw openssl jq
+apt-get install -y -qq curl wget git nginx ufw openssl jq ca-certificates gnupg lsb-release
 
 # ─────────────────────────────────────────────────────────────
-# 2. Node.js
+# 2. Node.js (for the dashboard backend)
 # ─────────────────────────────────────────────────────────────
 if ! command -v node &>/dev/null || [[ $(node -v | cut -d. -f1 | tr -d 'v') -lt 18 ]]; then
   info "Installing Node.js ${NODE_VERSION}..."
@@ -65,13 +65,23 @@ fi
 success "Node.js $(node -v) installed"
 
 # ─────────────────────────────────────────────────────────────
-# 3. code-server
+# 3. Docker (required for isolated workspace containers)
 # ─────────────────────────────────────────────────────────────
-if ! command -v code-server &>/dev/null; then
-  info "Installing code-server..."
-  curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/usr/local
+if ! command -v docker &>/dev/null; then
+  info "Installing Docker..."
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+    gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  chmod a+r /etc/apt/keyrings/docker.gpg
+  echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+    https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+    > /etc/apt/sources.list.d/docker.list
+  apt-get update -qq
+  apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  systemctl enable --now docker
 fi
-success "code-server $(code-server --version | head -1) installed"
+success "Docker $(docker --version | awk '{print $3}' | tr -d ',') installed"
 
 # ─────────────────────────────────────────────────────────────
 # 4. Create service user
@@ -80,6 +90,9 @@ if ! id "$SERVICE_USER" &>/dev/null; then
   info "Creating service user '${SERVICE_USER}'..."
   useradd -r -m -d /home/${SERVICE_USER} -s /bin/bash ${SERVICE_USER}
 fi
+
+# Add service user to docker group so it can manage containers
+usermod -aG docker ${SERVICE_USER}
 
 # ─────────────────────────────────────────────────────────────
 # 5. Clone / update Asterope
@@ -119,6 +132,14 @@ sudo -u ${SERVICE_USER} npm install
 sudo -u ${SERVICE_USER} npm run build
 
 # ─────────────────────────────────────────────────────────────
+# 7b. Build Docker images
+# ─────────────────────────────────────────────────────────────
+info "Building Asterope Docker images (this takes ~5-10 minutes)..."
+cd "${ASTEROPE_DIR}"
+bash scripts/build-images.sh
+success "Docker images built"
+
+# ─────────────────────────────────────────────────────────────
 # 8. Generate .env
 # ─────────────────────────────────────────────────────────────
 JWT_SECRET=$(openssl rand -hex 32)
@@ -145,7 +166,8 @@ info "Creating systemd service..."
 cat > /etc/systemd/system/asterope.service <<EOF
 [Unit]
 Description=Asterope Remote Development Dashboard
-After=network.target
+After=network.target docker.service
+Requires=docker.service
 
 [Service]
 Type=simple

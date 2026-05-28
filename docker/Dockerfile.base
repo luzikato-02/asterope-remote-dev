@@ -1,0 +1,25 @@
+FROM codercom/code-server:latest
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    wget \
+    vim \
+    nano \
+    htop \
+    zip \
+    unzip \
+    jq \
+    tree \
+    build-essential \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    software-properties-common \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+USER coder
+WORKDIR /home/coder/project

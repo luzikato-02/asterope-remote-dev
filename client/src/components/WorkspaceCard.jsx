@@ -13,11 +13,14 @@ const STATUS_CONFIG = {
 };
 
 const TEMPLATE_ICONS = {
-  blank:  '📄',
-  node:   '🟢',
-  python: '🐍',
-  react:  '⚛️',
-  go:     '🐹',
+  blank:     '📄',
+  node:      '🟢',
+  python:    '🐍',
+  react:     '⚛️',
+  go:        '🐹',
+  php:       '🐘',
+  laravel:   '🎼',
+  fullstack: '🌐',
 };
 
 function timeAgo(date) {
@@ -147,6 +150,11 @@ export default function WorkspaceCard({ workspace, onUpdate, onDelete }) {
               </div>
             )}
             <span className="text-[#484f58]">port {workspace.port}</span>
+            {workspace.image && (
+              <code className="text-[#484f58] text-[10px] bg-[#0d1117] px-1.5 py-0.5 rounded border border-[#21262d] truncate max-w-[120px]" title={workspace.image}>
+                {workspace.image.replace('asterope/', '')}
+              </code>
+            )}
           </div>
 
           {/* Error message */}

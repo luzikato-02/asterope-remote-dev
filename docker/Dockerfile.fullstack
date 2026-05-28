@@ -1,0 +1,41 @@
+FROM asterope/base:latest
+
+USER root
+
+# Node.js 20
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    npm install -g typescript ts-node nodemon yarn pnpm && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# PHP 8.3 + Composer
+RUN add-apt-repository -y ppa:ondrej/php && apt-get update && \
+    apt-get install -y --no-install-recommends \
+    php8.3-cli php8.3-curl php8.3-gd php8.3-intl php8.3-mbstring \
+    php8.3-mysql php8.3-pgsql php8.3-sqlite3 php8.3-xml php8.3-zip \
+    php8.3-bcmath php8.3-tokenizer \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+# Python 3
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv python3-dev \
+    && pip3 install --no-cache-dir poetry virtualenv \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Go
+ARG GO_VERSION=1.22.4
+RUN curl -sL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xzf -
+ENV PATH="${PATH}:/usr/local/go/bin"
+ENV GOPATH="/home/coder/go"
+
+# MySQL + Redis clients
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    default-mysql-client redis-tools \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /home/coder/go && chown -R coder:coder /home/coder/go
+
+USER coder
